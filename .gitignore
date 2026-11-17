@@ -2,3 +2,5 @@ iso/output/
 cosign.key
 *.key
 cosign.pub
+cosign.password
+cosign.env
