@@ -1,0 +1,27 @@
+{
+    "default": [
+        {
+            "type": "insecureAcceptAnything"
+        }
+    ],
+    "transports": {
+        "docker": {
+            "ghcr.io/s-gaisser/fe_sw_at": [
+                {
+                    "type": "sigstoreSigned",
+                    "keyPath": "/etc/pki/containers/fe_sw_at.pub",
+                    "signedIdentity": {
+                        "type": "matchRepository"
+                    }
+                }
+            ]
+        },
+        "docker-daemon": {
+            "": [
+                {
+                    "type": "insecureAcceptAnything"
+                }
+            ]
+        }
+    }
+}

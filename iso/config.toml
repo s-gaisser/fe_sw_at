@@ -1,0 +1,16 @@
+# bootc-image-builder config for the installer ISO.
+# Language, keyboard and time zone are preset; disk (enable encryption!), user,
+# password and hostname are chosen interactively in the installer.
+[customizations.installer.kickstart]
+contents = """
+lang en_US.UTF-8
+keyboard --vckeymap=us --xlayouts='us'
+timezone Europe/Berlin --utc
+"""
+
+[customizations.installer.modules]
+enable = [
+  "org.fedoraproject.Anaconda.Modules.Localization",
+  "org.fedoraproject.Anaconda.Modules.Timezone",
+  "org.fedoraproject.Anaconda.Modules.Users",
+]

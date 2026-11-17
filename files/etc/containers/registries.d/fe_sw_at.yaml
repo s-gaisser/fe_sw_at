@@ -1,0 +1,3 @@
+docker:
+  ghcr.io/s-gaisser/fe_sw_at:
+    use-sigstore-attachments: true

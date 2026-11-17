@@ -1,0 +1,78 @@
+# fe_sw_at
+
+A personal [bootc](https://containers.github.io/bootc/) image built on
+`quay.io/fedora/fedora-sway-atomic:44`. GitHub Actions rebuilds it every day on
+top of Fedora's latest base, signs it with cosign, and publishes it to
+`ghcr.io/s-gaisser/fe_sw_at`.
+
+## What differs from stock Fedora Sway Atomic
+
+**Added:**
+- tailscale (`tailscaled` enabled)
+- syncthing (enabled as a per-user service)
+- qutebrowser (default browser), with Vivaldi as a fallback
+- xplr as the folder handler (built from source)
+- kakoune as the system editor
+- gh, rclone, fastfetch, ramalama
+- tesseract with all language and script packs
+- a cheat-sheet wallpaper generated from the live sway/waybar config
+
+**Removed:**
+- Firefox
+- VM guest tools, mobile modem support, printing, scanning
+- VPN plugins, accessibility tools, CJK/m17n input methods
+- firmware for Intel, NVIDIA, Broadcom and other hardware this machine doesn't have
+- Thunar, vim and nano
+- the Flathub remote and gamemode
+
+The full list is in [`packages.remove`](packages.remove).
+
+**Configured:**
+- US keyboard with Compose on right Alt
+- chronyd on, fingerprint auth on
+- automatic update staging
+- firewall: no SSH on the LAN, `tailscale0` trusted
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `Containerfile` | The image definition |
+| `packages.install` / `packages.remove` | Package changes, one per line |
+| `files/` | Copied to `/` in the image |
+| `iso/` | Installer ISO build (`sudo iso/build-iso.sh`) |
+| `.github/workflows/build.yml` | Daily build, push and sign |
+
+## Everyday use
+
+```sh
+rpm-ostree upgrade        # updates are also staged automatically; reboot to apply
+rpm-ostree rollback       # boot the previous image again
+bootc status              # shows which image you're on
+```
+
+To change something, edit the repo and push. The next build is picked up by
+the next update.
+
+## First-time setup (signing)
+
+```sh
+podman run --rm -it -v "$PWD:/w:z" -w /w ghcr.io/sigstore/cosign/cosign:latest generate-key-pair
+mv cosign.pub files/etc/pki/containers/fe_sw_at.pub
+gh secret set SIGNING_SECRET   < cosign.key   # then store cosign.key OFFLINE and delete it here
+gh secret set SIGNING_PASSWORD                # the password chosen above
+```
+
+After the first successful build, set the ghcr package's visibility to
+**public**.
+
+## Installing
+
+1. Run `sudo iso/build-iso.sh`. The result is `iso/output/bootiso/install.iso`.
+2. Write the ISO to a USB stick and boot from it. Choose the disk with
+   **encryption enabled**, and create the user and hostname.
+3. After the first boot, run:
+   ```sh
+   sudo bootc switch --enforce-container-sigpolicy ghcr.io/s-gaisser/fe_sw_at:44
+   sudo tailscale up
+   ```

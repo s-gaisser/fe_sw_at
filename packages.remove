@@ -1,0 +1,193 @@
+# Packages removed from stock fedora-sway-atomic. One per line; '#' starts a comment.
+
+# Browser (replaced by qutebrowser + Vivaldi)
+firefox
+firefox-langpacks
+
+# VM guest tools
+open-vm-tools
+open-vm-tools-desktop
+virtualbox-guest-additions
+qemu-guest-agent
+spice-vdagent
+spice-webdavd
+hyperv-daemons
+hyperv-daemons-license
+hypervfcopyd
+hypervkvpd
+hypervvssd
+
+# Mobile modem (mobile-broadband-provider-info stays: network-manager-applet needs it)
+ModemManager
+NetworkManager-wwan
+fwupd-plugin-modem-manager
+usb_modeswitch
+usb_modeswitch-data
+qcom-wwan-firmware
+libmbim-utils
+libqmi-utils
+
+# Intel-only daemons
+intel-lpmd
+thermald
+mcelog
+
+# Printing
+cups
+cups-browsed
+cups-client
+cups-filters
+cups-filters-driverless
+cups-ipptool
+bluez-cups
+gutenprint
+gutenprint-cups
+hplip
+c2esp
+dymo-cups-drivers
+splix
+ptouch-driver
+printer-driver-brlaser
+braille-printer-app
+system-config-printer
+system-config-printer-udev
+python3-cups
+ipp-usb
+paps
+mpage
+
+# RAID monitoring: mdadm stays (udisks2 needs it); its units are masked in the Containerfile
+
+# Scanning
+sane-backends
+sane-backends-drivers-scanners
+sane-backends-drivers-cameras
+sane-airscan
+libsane-airscan
+libsane-hpaio
+
+# Input methods (CJK, m17n, typing-booster); base ibus stays
+ibus-anthy
+ibus-anthy-python
+ibus-chewing
+ibus-hangul
+ibus-libpinyin
+ibus-m17n
+ibus-typing-booster
+
+# VPN (Tailscale is used instead)
+NetworkManager-l2tp
+NetworkManager-l2tp-gnome
+NetworkManager-libreswan
+NetworkManager-libreswan-gnome
+NetworkManager-openconnect
+NetworkManager-openconnect-gnome
+NetworkManager-openvpn
+NetworkManager-openvpn-gnome
+NetworkManager-sstp
+NetworkManager-sstp-gnome
+NetworkManager-vpnc
+NetworkManager-vpnc-gnome
+openconnect
+openvpn
+vpnc
+vpnc-script
+sstp-client
+libreswan
+go-l2tp
+wireguard-tools
+
+# Accessibility
+orca
+brltty
+python3-brlapi
+speech-dispatcher
+speech-dispatcher-espeak-ng
+speech-dispatcher-utils
+python3-speechd
+espeak-ng
+liblouisutdml-utils
+
+# Firmware/drivers for hardware not present (AMD CPU+GPU, MediaTek Wi-Fi, Realtek Ethernet)
+atheros-firmware
+b43-fwcutter
+b43-openfwwf
+brcmfmac-firmware
+cirrus-audio-firmware
+intel-audio-firmware
+intel-gpu-firmware
+intel-vsc-firmware
+iwlegacy-firmware
+iwlwifi-dvm-firmware
+iwlwifi-mld-firmware
+iwlwifi-mvm-firmware
+libertas-firmware
+nvidia-gpu-firmware
+nxpwireless-firmware
+tiwilink-firmware
+intel-gmmlib
+intel-mediasdk
+intel-vpl-gpu-rt
+libva-intel-media-driver
+microcode_ctl
+
+# iPhone support (libimobiledevice libs stay: upower needs them)
+usbmuxd
+
+# Smartcards
+pcsc-lite
+pcsc-lite-ccid
+opensc
+opensc-libs
+
+# Network shares (wsdd stays: gvfs requires it)
+samba-client
+cifs-utils
+cifs-utils-info
+gvfs-smb
+nfs-utils
+nfs-client-utils
+nfs-common-utils
+nfsv3-client-utils
+nfsv4-client-utils
+rpcbind
+
+# Domain join
+realmd
+
+# Emulation / checkpointing
+qemu-user-static-aarch64
+criu
+
+# File manager (replaced by xplr)
+Thunar
+thunar-archive-plugin
+tumbler
+xfce4-panel
+
+# Exotic filesystems (os-prober must stay: grub2-tools requires it)
+f2fs-tools
+nilfs-utils
+hfsplus-tools
+udftools
+
+# Support/report tools
+sos
+fpaste
+
+# Legacy odds
+lrzsz
+iptstate
+pinfo
+words
+
+# Editors (kakoune is the system editor)
+vim-minimal
+vim-data
+nano
+nano-default-editor
+default-editor
+
+# Other
+fedora-flathub-remote
+gamemode

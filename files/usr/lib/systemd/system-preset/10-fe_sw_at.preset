@@ -1,0 +1,3 @@
+enable tailscaled.service
+enable chronyd.service
+enable rpm-ostreed-automatic.timer

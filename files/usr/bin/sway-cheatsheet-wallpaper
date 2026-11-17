@@ -1,0 +1,975 @@
+#!/usr/bin/python3
+"""
+sway-cheatsheet-wallpaper — a dynamic cheat-sheet wallpaper for sway.
+
+Every visual and textual decision is read from the configuration that actually
+styles and drives the running window manager:
+
+  * key bindings + their glosses .. the sway config tree (main config plus the
+                                    layered config.d includes, resolved exactly
+                                    like sway resolves them), comments included
+  * colors, font, padding ....... waybar's config.jsonc + style.css (the WM's
+                                    stylesheet); sway `client.*`/`font`
+                                    directives are honored when present
+  * canvas / bar geometry ....... live sway IPC (outputs, scale) + waybar config
+  * german letter sequences ..... the system X11 Compose file of the active
+                                    locale; codepoints computed from the chars
+  * compose key label ........... live xkb_options of the keyboard (sway IPC)
+
+The sheet is laid out below the bar; its text padding equals the padding of
+the leftmost workspace button (the "1" in the top-left corner). The number of
+columns/rows follows from the number of entries found at generation time.
+
+Triggered by `exec_always` in /etc/sway/config.d/99-cheatsheet-wallpaper.conf,
+i.e. on every sway reload (Mod4+Shift+c) — the same mechanism that applies
+configuration/theme changes. Applies the result itself via sway IPC.
+
+No third-party dependencies beyond Pillow (python3-pillow).
+"""
+
+import glob
+import json
+import os
+import re
+import socket
+import struct
+import subprocess
+import sys
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
+
+HOME = Path.home()
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "sway-cheatsheet-wallpaper"
+LOG_FILE = CACHE_DIR / "generate.log"
+
+# German letters that a US layout cannot produce natively.
+GERMAN_CHARS = "äöüßÄÖÜẞ"
+
+# ---------------------------------------------------------------------------
+# sway IPC (pure python, no swaymsg needed)
+# ---------------------------------------------------------------------------
+
+IPC_MAGIC = b"i3-ipc"
+GET_OUTPUTS, GET_BAR_CONFIG, GET_VERSION, GET_CONFIG, GET_INPUTS = 3, 6, 7, 9, 100
+RUN_COMMAND = 0
+
+
+class SwayIPC:
+    def __init__(self):
+        self.sock = None
+        candidates = []
+        if os.environ.get("SWAYSOCK"):
+            candidates.append(os.environ["SWAYSOCK"])
+        candidates += sorted(glob.glob(f"/run/user/{os.getuid()}/sway-ipc.{os.getuid()}.*.sock"))
+        for path in candidates:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect(path)
+                self.sock = s
+                self._msg(GET_VERSION)  # probe: stale sockets fail here
+                break
+            except OSError:
+                if self.sock:
+                    self.sock.close()
+                self.sock = None
+        if not self.sock:
+            raise RuntimeError("no running sway found (no usable IPC socket)")
+
+    def _recv_exact(self, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise RuntimeError("sway IPC connection closed")
+            buf += chunk
+        return buf
+
+    def _msg(self, mtype, payload=""):
+        data = payload.encode()
+        self.sock.sendall(IPC_MAGIC + struct.pack("<II", len(data), mtype) + data)
+        magic = self._recv_exact(6)
+        if magic != IPC_MAGIC:
+            raise RuntimeError("bad sway IPC reply")
+        length, rtype = struct.unpack("<II", self._recv_exact(8))
+        body = self._recv_exact(length)
+        return json.loads(body) if body else None
+
+    def outputs(self):
+        return [o for o in self._msg(GET_OUTPUTS) if o.get("active")]
+
+    def inputs(self):
+        return self._msg(GET_INPUTS)
+
+    def command(self, cmd):
+        return self._msg(RUN_COMMAND, cmd)
+
+
+# ---------------------------------------------------------------------------
+# sway config tree: locate, follow includes, parse
+# ---------------------------------------------------------------------------
+
+def find_main_config():
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+    for p in (xdg / "sway/config", HOME / ".config/sway/config",
+              Path("/etc/sway/config"), Path("/usr/etc/sway/config")):
+        if p.is_file():
+            return p
+    raise RuntimeError("no sway config found")
+
+
+def expand_include(arg):
+    """Resolve an `include` argument the way sway does (wordexp-ish)."""
+    arg = arg.strip()
+    if arg[:1] in ("'", '"') and arg[-1:] == arg[:1]:
+        arg = arg[1:-1]
+    if "$(" in arg or "`" in arg:
+        # command substitution: let the shell expand it, like wordexp(3)
+        out = subprocess.run(["sh", "-c", f'printf "%s\\n" {arg}'],
+                             capture_output=True, text=True, timeout=10)
+        return [l for l in out.stdout.splitlines() if l.strip()]
+    return sorted(glob.glob(os.path.expandvars(arg)))
+
+
+def load_config_tree(path, seen=None):
+    """Return [(path, text)] in sway load order, following includes."""
+    if seen is None:
+        seen = set()
+    path = Path(path).resolve()
+    if path in seen or not path.is_file():
+        return []
+    seen.add(path)
+    result = [(str(path), path.read_text())]
+    # join backslash-continued lines before scanning for includes
+    text = re.sub(r"\\\n", " ", result[0][1])
+    for m in re.finditer(r"^\s*include\s+(.+?)\s*$", text, re.M):
+        for inc in expand_include(m.group(1)):
+            result += load_config_tree(inc, seen)
+    return result
+
+
+def logical_lines(text):
+    """Yield lines with backslash continuations joined."""
+    buf = ""
+    for line in text.splitlines():
+        if line.endswith("\\"):
+            buf += line[:-1] + " "
+        else:
+            yield buf + line
+            buf = ""
+    if buf:
+        yield buf
+
+
+def expand_vars(s, variables):
+    for _ in range(5):
+        new = re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*)",
+                     lambda m: variables.get(m.group(1), m.group(0)), s)
+        if new == s:
+            break
+        s = new
+    return s
+
+
+def section_from_filename(path):
+    name = Path(path).stem
+    name = re.sub(r"^\d+-", "", name)
+    name = re.sub(r"^bindings-", "", name)
+    return name.replace("-", " ").capitalize()
+
+
+class Binding:
+    __slots__ = ("keys", "command", "gloss", "mode", "locked", "section", "order")
+
+    def __init__(self, keys, command, gloss, mode, locked, section, order):
+        self.keys, self.command, self.gloss = keys, command, gloss
+        self.mode, self.locked, self.section, self.order = mode, locked, section, order
+
+
+def parse_config(tree):
+    """Walk the config tree; collect bindings, settings and input options."""
+    variables, bindings, settings = {}, [], {}
+    input_opts = {}
+    order = 0
+    for path, text in tree:
+        section = section_from_filename(path) if Path(path).parent.name == "config.d" else None
+        mode = None            # current mode block (None = default)
+        bindsym_block = None   # flags of an open `bindsym {` block
+        comments = []          # consecutive comment lines above a binding
+        for raw in logical_lines(text):
+            line = raw.strip()
+            if not line:
+                comments = []
+                continue
+            if line.startswith("#"):
+                comment = line.lstrip("#").strip()
+                if not comment:
+                    comments = []
+                    continue
+                m = re.match(r"^(.+):$", comment)
+                if m and mode is None and bindsym_block is None:
+                    section = m.group(1).strip()
+                    comments = []
+                else:
+                    comments.append(comment)
+                continue
+            pending_comment = comments[0] if comments else None
+
+            # block bookkeeping
+            if line == "}":
+                if bindsym_block is not None:
+                    bindsym_block = None
+                elif mode is not None:
+                    mode = None
+                else:
+                    settings.pop("_input_id", None)
+                comments = []
+                continue
+
+            m = re.match(r'^mode\s+"([^"]+)"\s*\{', line)
+            if m:
+                mode = m.group(1)
+                section = f"{mode} mode"
+                comments = []
+                continue
+
+            m = re.match(r"^bindsym\s+((?:--\w+\s+)*)\{", line)
+            if m:
+                bindsym_block = m.group(1).split()
+                comments = []
+                continue
+
+            m = re.match(r"^set\s+\$(\w+)\s+(.+)$", line)
+            if m:
+                variables[m.group(1)] = m.group(2).strip().strip("'\"")
+                comments = []
+                continue
+
+            m = re.match(r"^include\s+", line)
+            if m:
+                continue  # already followed by load_config_tree
+
+            # inside a `bindsym { ... }` block: KEY command
+            if bindsym_block is not None:
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    keys, cmd = parts
+                    bindings.append(Binding(
+                        expand_vars(keys, variables), expand_vars(cmd, variables),
+                        pending_comment, mode, "--locked" in bindsym_block,
+                        section, order))
+                    order += 1
+                comments = []
+                continue
+
+            m = re.match(r"^(bindsym|bindcode)\s+((?:--\w+\s+)*)(\S+)\s+(.+)$", line)
+            if m:
+                kind, flags, keys, cmd = m.groups()
+                keys = expand_vars(keys, variables)
+                cmd = expand_vars(cmd, variables)
+                sec = section
+                mm = re.match(r'^mode\s+"?([^"]+)"?$', cmd)
+                if mm and mode is None:
+                    sec = f"{mm.group(1)} mode"  # mode-entry binds live with their mode
+                bindings.append(Binding(keys, cmd, pending_comment, mode,
+                                        "--locked" in flags.split(), sec, order))
+                order += 1
+                comments = []
+                continue
+
+            # settings we care about
+            m = re.match(r"^output\s+(\S+)\s+bg\s+(\S+)\s+(\S+)", line)
+            if m:
+                settings["bg"] = (m.group(1), m.group(2), m.group(3))
+            m = re.match(r"^font\s+(.+)$", line)
+            if m:
+                settings["font"] = m.group(1).strip()
+            m = re.match(r"^(client\.\w+)\s+(.+)$", line)
+            if m:
+                settings[m.group(1)] = m.group(2).split()
+            m = re.match(r"^floating_modifier\s+(\S+)(?:\s+(\S+))?", line)
+            if m:
+                settings["floating_modifier"] = (expand_vars(m.group(1), variables),
+                                                 m.group(2) or "normal")
+            m = re.match(r'^input\s+(\S+)\s*\{', line)
+            if m:
+                settings["_input_id"] = m.group(1)
+            m = re.match(r"^xkb_(layout|options|variant)\s+(.+)$", line)
+            if m and "_input_id" in settings:
+                input_opts.setdefault(settings["_input_id"], {})["xkb_" + m.group(1)] = m.group(2).strip()
+            comments = []
+    return variables, bindings, settings, input_opts
+
+
+# ---------------------------------------------------------------------------
+# key labels and glosses
+# ---------------------------------------------------------------------------
+
+KEY_LABELS = {
+    "Mod4": "Super", "Mod1": "Alt", "Mod2": "Num", "Mod3": "Mod3", "Mod5": "AltGr",
+    "Control": "Ctrl", "Shift": "Shift", "Return": "Enter", "space": "Space",
+    "minus": "-", "plus": "+", "equal": "=", "Escape": "Esc", "Print": "PrtSc",
+    "Pause": "Pause", "BackSpace": "Backspace", "Tab": "Tab", "Delete": "Del",
+    "Left": "←", "Right": "→", "Up": "↑", "Down": "↓",
+    "XF86AudioRaiseVolume": "Vol+", "XF86AudioLowerVolume": "Vol-",
+    "XF86AudioMute": "Mute", "XF86AudioMicMute": "MicMute",
+    "XF86AudioPlay": "Play", "XF86AudioPause": "Pause", "XF86AudioStop": "Stop",
+    "XF86AudioNext": "Next", "XF86AudioPrev": "Prev",
+    "XF86AudioForward": "Fwd", "XF86AudioRewind": "Rew",
+    "XF86MonBrightnessUp": "Bright+", "XF86MonBrightnessDown": "Bright-",
+}
+
+
+def key_label(combo):
+    return "+".join(KEY_LABELS.get(k, k) for k in combo.split("+"))
+
+
+def derive_gloss(cmd):
+    """Gloss from the command itself; None when the config comment is better."""
+    c = cmd.strip()
+    m = re.match(r"^workspace number (\d+)$", c)
+    if m:
+        return f"Go to workspace {m.group(1)}"
+    m = re.match(r"^move container to workspace number (\d+)$", c)
+    if m:
+        return f"Move window to workspace {m.group(1)}"
+    m = re.match(r"^focus (left|down|up|right|parent|mode_toggle)$", c)
+    if m:
+        return {"left": "Focus window left", "down": "Focus window down",
+                "up": "Focus window up", "right": "Focus window right",
+                "parent": "Focus parent container",
+                "mode_toggle": "Switch focus tiling ⇄ floating"}[m.group(1)]
+    m = re.match(r"^move (left|down|up|right)$", c)
+    if m:
+        return f"Move window {m.group(1)}"
+    if c == "kill":
+        return "Kill focused window"
+    if c == "reload":
+        return "Reload configuration (also regenerates this wallpaper)"
+    if c == "splith":
+        return "Split horizontally"
+    if c == "splitv":
+        return "Split vertically"
+    m = re.match(r"^layout (.+)$", c)
+    if m:
+        return f"Layout: {m.group(1)}"
+    if c == "fullscreen":
+        return "Toggle fullscreen"
+    if c == "floating toggle":
+        return "Toggle floating for this window"
+    if c == "move scratchpad":
+        return "Send window to scratchpad"
+    if c == "scratchpad show":
+        return "Show / cycle scratchpad windows"
+    m = re.match(r'^resize (shrink|grow) (width|height) (\d+)px$', c)
+    if m:
+        return f"{m.group(1).capitalize()} {m.group(2)} {m.group(3)}px"
+    m = re.match(r'^mode "?([^"]+)"?$', c)
+    if m:
+        if m.group(1) == "default":
+            return "Leave this mode"
+        if m.group(1) == "passthrough":
+            return "Enter passthrough mode (keys go to the app)"
+        return f"Enter {m.group(1)} mode"
+    if "set-sink-mute" in c:
+        return "Toggle speaker mute"
+    if "set-source-mute" in c:
+        return "Toggle microphone mute"
+    if "playerctl" in c:
+        act = c.split("playerctl", 1)[1].strip()
+        return {"play-pause": "Media: play / pause", "pause": "Media: pause",
+                "stop": "Media: stop", "next": "Media: next track",
+                "previous": "Media: previous track",
+                "position +10": "Media: forward 10s",
+                "position -10": "Media: rewind 10s"}.get(act, f"Media: {act}")
+    if "brightnessctl" in c:
+        return "Brightness +5%" if "+${" in c or "set +" in c else "Brightness −5%"
+    if "volume-helper" in c or "volume_helper" in c:
+        return "Volume up" if "--increase" in c else "Volume down"
+    m = re.match(r"^exec grimshot save (\w+)", c)
+    if m:
+        return {"output": "Screenshot: whole screen",
+                "active": "Screenshot: focused window",
+                "area": "Screenshot: select area"}.get(m.group(1), f"Screenshot: {m.group(1)}")
+    m = re.match(r"^exec (\S+)", c)
+    if m:
+        prog = m.group(1).split("/")[-1]
+        if prog in ("foot", "$term"):
+            return "Open terminal (foot)"
+        if prog in ("rofi", "$menu", "$rofi_cmd"):
+            return "Application launcher (rofi)"
+    return None
+
+
+def build_entries(bindings, settings):
+    """Merge equal commands, compress workspace rows, order sections."""
+    # merge bindings with identical (section, mode, command)
+    merged = {}
+    for b in bindings:
+        gloss = derive_gloss(b.command) or b.gloss or b.command
+        gloss = re.sub(r"\s+", " ", gloss).strip()
+        if b.locked:
+            gloss += " (also when locked)"
+        key = (b.section, b.mode, b.command)
+        if key in merged:
+            e = merged[key]
+            if key_label(b.keys) not in e["keys"]:
+                e["keys"].append(key_label(b.keys))
+        else:
+            merged[key] = {"section": b.section or "Other", "mode": b.mode,
+                           "keys": [key_label(b.keys)], "gloss": gloss,
+                           "command": b.command, "order": b.order}
+    entries = list(merged.values())
+
+    # compress the ten workspace-number bindings into one row each
+    for verb, gloss in (("workspace number", "Go to workspace 1–10 (0 = 10)"),
+                        ("move container to workspace number", "Move window to workspace 1–10")):
+        group = [e for e in entries if e["command"].startswith(verb + " ")
+                 and e["mode"] is None]
+        nums = {}
+        for e in group:
+            n = int(e["command"].rsplit(" ", 1)[1])
+            nums[n] = e
+        if set(nums) == set(range(1, 11)):
+            first = min(group, key=lambda e: e["order"])
+            modkeys = {k.rsplit("+", 1)[0] for e in group for k in e["keys"]}
+            if len(modkeys) == 1:
+                mod = modkeys.pop()
+                for e in group:
+                    entries.remove(e)
+                entries.append({"section": first["section"], "mode": None,
+                                "keys": [f"{mod}+1…0"], "gloss": gloss,
+                                "command": verb, "order": first["order"]})
+
+    # floating modifier is a (mouse) binding worth listing
+    if "floating_modifier" in settings:
+        mod, direction = settings["floating_modifier"]
+        drag, resize = ("left", "right") if direction == "normal" else ("right", "left")
+        entries.append({"section": "Basics", "mode": None,
+                        "keys": [f"{key_label(mod)}+{drag.capitalize()}-drag"],
+                        "gloss": f"Drag floating windows ({resize} button: resize)",
+                        "command": "floating_modifier", "order": -1})
+
+    # group into sections, mode-entry binding first inside its mode section
+    sections = []
+    index = {}
+    for e in sorted(entries, key=lambda e: e["order"]):
+        sec = e["section"]
+        if sec not in index:
+            index[sec] = len(sections)
+            sections.append({"name": sec, "entries": []})
+        sections[index[sec]]["entries"].append(e)
+    for sec in sections:
+        if sec["name"].endswith(" mode"):
+            mode = sec["name"][:-5]
+            sec["entries"].sort(key=lambda e: 0 if e["command"] == f'mode "{mode}"' else 1)
+    return [s for s in sections if s["entries"]]
+
+
+# ---------------------------------------------------------------------------
+# waybar: the window manager's stylesheet
+# ---------------------------------------------------------------------------
+
+def find_waybar_config():
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+    for d in (xdg / "waybar", Path("/etc/xdg/waybar")):
+        for name in ("config.jsonc", "config"):
+            p = d / name
+            if p.is_file():
+                return p
+    return None
+
+
+def strip_jsonc(text):
+    """Remove // and /* */ comments and trailing commas, respecting strings."""
+    def scan(text, handle_comma):
+        out, i, n = [], 0, len(text)
+        while i < n:
+            c = text[i]
+            if c == '"':
+                j = i + 1
+                while j < n:
+                    if text[j] == "\\":
+                        j += 2
+                        continue
+                    if text[j] == '"':
+                        break
+                    j += 1
+                out.append(text[i:j + 1])
+                i = j + 1
+            elif text.startswith("//", i):
+                while i < n and text[i] != "\n":
+                    i += 1
+            elif text.startswith("/*", i):
+                end = text.find("*/", i + 2)
+                i = n if end < 0 else end + 2
+            elif c == "," and handle_comma:
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j < n and text[j] in "}]":
+                    i += 1  # trailing comma: JSONC allows it, JSON does not
+                else:
+                    out.append(c)
+                    i += 1
+            else:
+                out.append(c)
+                i += 1
+        return "".join(out)
+    return scan(scan(text, False), True)
+
+
+def parse_css(text):
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"@keyframes[^{]*\{(?:[^{}]*|\{[^{}]*\})*\}", "", text)
+    rules = {}
+    for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", text):
+        props = {}
+        for decl in m.group(2).split(";"):
+            if ":" in decl:
+                k, v = decl.split(":", 1)
+                props[k.strip()] = v.strip()
+        for sel in m.group(1).split(","):
+            sel = sel.strip()
+            if sel:
+                rules.setdefault(sel, {}).update(props)
+    return rules
+
+
+def parse_color(s):
+    s = s.strip()
+    m = re.match(r"#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$", s)
+    if m:
+        h = m.group(1)
+        if len(h) == 3:
+            h = "".join(2 * c for c in h)
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4)) + (1.0,)
+    m = re.match(r"rgba?\(([^)]+)\)", s)
+    if m:
+        parts = [p.strip() for p in m.group(1).split(",")]
+        rgb = tuple(int(float(p)) for p in parts[:3])
+        a = float(parts[3]) if len(parts) > 3 else 1.0
+        return rgb + (a,)
+    return None
+
+
+def over(fg, base):
+    """Composite a (possibly translucent) color over an opaque base."""
+    r, g, b, a = fg
+    return tuple(round(a * c + (1 - a) * d) for c, d in zip((r, g, b), base))
+
+
+def px(value, default=0.0):
+    m = re.search(r"(-?[\d.]+)\s*px", value or "")
+    return float(m.group(1)) if m else default
+
+
+def padding_x(value):
+    parts = (value or "0").split()
+    if len(parts) == 1:
+        return px(parts[0])
+    return px(parts[1])  # 2-value shorthand: vertical horizontal
+
+
+def read_waybar_style(wb_cfg_path):
+    cfg = json.loads(strip_jsonc(wb_cfg_path.read_text())) if wb_cfg_path else {}
+    css_path = wb_cfg_path.parent / "style.css" if wb_cfg_path else None
+    css = parse_css(css_path.read_text()) if css_path and css_path.is_file() else {}
+
+    univ = css.get("*", {})
+    fam = "monospace"
+    m = re.search(r"'([^']+)'|\"([^\"]+)\"", univ.get("font-family", ""))
+    if m:
+        fam = m.group(1) or m.group(2)
+    size = px(univ.get("font-size"), 13)
+
+    bar = css.get("window#waybar", {})
+    bar_bg = parse_color(bar.get("background-color", "#2B303B")) or (43, 48, 59, 1.0)
+    base = bar_bg[:3]
+    fg = parse_color(bar.get("color", "#ffffff")) or (255, 255, 255, 1.0)
+    border_w, border_col = 0, base
+    m = re.match(r"([\d.]+)px\s+\w+\s+(.+)", bar.get("border-bottom", ""))
+    if m:
+        border_w = float(m.group(1))
+        c = parse_color(m.group(2))
+        if c:
+            border_col = over(c, base)
+
+    ws = css.get("#workspaces button", {})
+    ws_pad = padding_x(ws.get("padding", "0 5px"))
+    chip_fg = over(parse_color(ws.get("color", "#ffffff")) or (255, 255, 255, 1.0), base)
+    focused = css.get("#workspaces button.focused", css.get("#workspaces button.active", {}))
+    chip_bg = parse_color(focused.get("background-color", "#64727D")) or (100, 114, 125, 1.0)
+    chip_bg = over(chip_bg, base)
+    underline_w, underline_col = 0, fg[:3]
+    m = re.match(r"inset\s+0\s+(-?[\d.]+)px\s+(.+)", focused.get("box-shadow", ""))
+    if m:
+        underline_w = abs(float(m.group(1)))
+        c = parse_color(m.group(2))
+        if c:
+            underline_col = over(c, base)
+
+    lang = css.get("#language", {})
+    lang_bg = over(parse_color(lang.get("background", lang.get("background-color", "#00b093")))
+                   or (0, 176, 147, 1.0), base)
+    lang_fg = over(parse_color(lang.get("color", "#740864")) or (116, 8, 100, 1.0), lang_bg)
+    lang_pad = padding_x(lang.get("padding", "0 5px"))
+    lang_margin = padding_x(lang.get("margin", "0 5px"))
+
+    # effective left margin of the workspaces module (leftmost => 0 per CSS)
+    ws_margin = padding_x(css.get("#workspaces", {}).get("margin", "0"))
+    modules_left = cfg.get("modules-left", [])
+    if modules_left and modules_left[0] == "sway/workspaces":
+        first_rule = css.get(".modules-left > widget:first-child > #workspaces", {})
+        if "margin-left" in first_rule:
+            ws_margin = px(first_rule["margin-left"])
+
+    return {
+        "font_family": fam, "font_size": size,
+        "base": base, "fg": over(fg, base), "border_col": border_col,
+        "border_w": border_w,
+        "bar_height": float(cfg.get("height", 30)),
+        "bar_position": cfg.get("position", "top"),
+        "spacing": float(cfg.get("spacing", 4)),
+        "sheet_padding": ws_pad + ws_margin,   # padding of the "1" from the screen edge
+        "chip_bg": chip_bg, "chip_pad": ws_pad, "chip_fg": chip_fg,
+        "underline_w": underline_w, "underline_col": underline_col,
+        "lang_bg": lang_bg, "lang_fg": lang_fg,
+        "lang_pad": lang_pad, "lang_margin": lang_margin,
+        "css_path": str(css_path) if css_path else None,
+        "cfg_path": str(wb_cfg_path) if wb_cfg_path else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# german letters: compose sequences from the system Compose file
+# ---------------------------------------------------------------------------
+
+KEYSYM_LABELS = {
+    "quotedbl": '"', "apostrophe": "'", "grave": "`", "acute": "´",
+    "diaeresis": "¨", "macron": "¯", "cedilla": "¸", "comma": ",",
+    "period": ".", "slash": "/", "minus": "-", "plus": "+", "equal": "=",
+    "space": "Space", "underscore": "_", "colon": ":", "semicolon": ";",
+}
+
+
+def find_compose_file():
+    if os.environ.get("XCOMPOSEFILE"):
+        p = Path(os.environ["XCOMPOSEFILE"])
+        if p.is_file():
+            return p
+    lang = os.environ.get("LANG", "en_US.UTF-8").split(".")[0]
+    enc = os.environ.get("LANG", "en_US.UTF-8").split(".")[1] if "." in os.environ.get("LANG", "") else "UTF-8"
+    enc = "UTF-8" if enc.upper().replace("-", "") == "UTF8" else enc
+    for loc in (f"{lang}.{enc}", "en_US.UTF-8"):
+        p = Path(f"/usr/share/X11/locale/{loc}/Compose")
+        if p.is_file():
+            return p
+    return None
+
+
+def german_sequences():
+    """Shortest all-printable Multi_key sequence per char, from the Compose file."""
+    cf = find_compose_file()
+    seqs = {c: None for c in GERMAN_CHARS}
+    if cf:
+        for line in cf.read_text(errors="replace").splitlines():
+            m = re.match(r'^((?:<[^>]+>\s*)+):\s*"(.+?)"', line)
+            if not m or m.group(2) not in seqs:
+                continue
+            keys = re.findall(r"<([^>]+)>", m.group(1))
+            if keys[0] != "Multi_key" or any(k.startswith("dead_") for k in keys):
+                continue
+            labels = []
+            for k in keys[1:]:
+                if k in KEYSYM_LABELS:
+                    labels.append(KEYSYM_LABELS[k])
+                elif len(k) == 1:
+                    labels.append(k)
+                else:
+                    labels = None
+                    break
+            if labels is None:
+                continue
+            cand = "Compose + " + " + ".join(labels)
+            rank = (len(keys), any(ord(l) > 127 for l in labels))
+            cur = seqs[m.group(2)]
+            if cur is None or rank < cur[0]:
+                seqs[m.group(2)] = (rank, cand)
+    return {c: (v[1] if v else "—") for c, v in seqs.items()}, str(cf) if cf else None
+
+
+def compose_key_label(ipc, input_opts):
+    """Which physical key is Compose, from live xkb_options (or config)."""
+    opts = ""
+    try:
+        for i in ipc.inputs():
+            if i.get("type") == "keyboard" and i.get("xkb_options"):
+                opts = i["xkb_options"]
+                break
+    except Exception:
+        pass
+    if not opts:
+        for o in input_opts.values():
+            if o.get("xkb_options"):
+                opts = o["xkb_options"]
+                break
+    labels = {"compose:ralt": "Right Alt", "compose:lalt": "Left Alt",
+              "compose:caps": "Caps Lock", "compose:rwin": "Right Super",
+              "compose:lwin": "Left Super", "compose:menu": "Menu",
+              "compose:prsc": "PrtSc", "compose:sclk": "Scroll Lock"}
+    for o in opts.split(","):
+        o = o.strip()
+        if o in labels:
+            return labels[o], o
+    return None, opts
+
+
+# ---------------------------------------------------------------------------
+# rendering
+# ---------------------------------------------------------------------------
+
+def load_font(family, size_px, weight=400):
+    file = None
+    try:
+        out = subprocess.run(["fc-match", "-f", "%{file}", family],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            file = out.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    font = ImageFont.truetype(file, size_px) if file else ImageFont.load_default(size_px)
+    if weight != 400:
+        try:
+            font.set_variation_by_axes([weight])
+        except Exception:
+            pass
+    return font
+
+
+def render(out, style, sections, german, comp_label, layout_name, mod_label, meta_extra):
+    scale = out.get("scale", 1.0)
+    mode = out.get("current_mode") or {}
+    W = mode.get("width") or out["rect"]["width"]
+    H = mode.get("height") or out["rect"]["height"]
+    W, H = round(W * scale), round(H * scale)
+
+    def s(v):  # config px -> image px
+        return v * scale
+
+    font_size = max(1, round(s(style["font_size"])))
+    font = load_font(style["font_family"], font_size, 400)
+    bold = load_font(style["font_family"], font_size, 600)
+    base, fg = style["base"], style["fg"]
+    spacing = s(style["spacing"])
+    pad = s(style["sheet_padding"])
+    chip_h = s(style["bar_height"])
+    chip_pad = s(style["chip_pad"])
+    underline = s(style["underline_w"])
+    line_h = font_size + 4 * scale
+
+    # content box: screen minus the bar. waybar draws its border INSIDE the
+    # configured height (verified on-screen: 30px total incl. 3px border),
+    # so the bar footprint equals the configured height when one is set.
+    if style["bar_height"]:
+        bar_total = s(style["bar_height"])
+    else:
+        bar_total = s(style["font_size"] + 4 + style["border_w"])
+    pos = style["bar_position"]
+    cx, cy = pad, pad
+    cw, ch = W - 2 * pad, H - 2 * pad
+    if pos == "top":
+        cy, ch = bar_total + pad, H - bar_total - 2 * pad
+    elif pos == "bottom":
+        ch = H - bar_total - 2 * pad
+    elif pos == "left":
+        cx, cw = bar_total + pad, W - bar_total - 2 * pad
+    elif pos == "right":
+        cw = W - bar_total - 2 * pad
+
+    img = Image.new("RGB", (W, H), base)
+    d = ImageDraw.Draw(img)
+
+    def text_w(t, f=font):
+        return f.getlength(t)
+
+    # ---- title + meta: full-width rows above the columns ------------------
+    meta = (f"mod: {mod_label} · layout: {layout_name}"
+            + (f" · compose: {comp_label[0]} ({comp_label[1]})" if comp_label[0] else "")
+            + f" · {out['name']} {W}×{H}" + meta_extra)
+    d.text((cx, cy + chip_h / 2), "sway cheat sheet", font=bold, fill=fg, anchor="lm")
+    d.text((cx, cy + chip_h + spacing + line_h / 2), meta, font=font, fill=fg, anchor="lm")
+    top = cy + chip_h + spacing + line_h + spacing
+
+    # ---- measure entries -------------------------------------------------
+    rows = []  # (kind, payload, height)
+    for sec in sections:
+        rows.append(("header", sec["name"], chip_h))
+        for e in sec["entries"]:
+            keys = " / ".join(e["keys"])
+            rows.append(("entry", (keys, e["gloss"]), chip_h))
+
+    entry_w = max((chip_pad * 2 + text_w(k) + spacing + text_w(g)
+                   for kind, p, _ in rows if kind == "entry" for k, g in [p]), default=100)
+    header_w = max((text_w(p, bold) for kind, p, _ in rows if kind == "header"), default=0)
+    col_min = max(entry_w, header_w) + spacing
+
+    # ---- german strip (bottom), styled after waybar's #language module ----
+    lang_pad, lang_margin = s(style["lang_pad"]), s(style["lang_margin"])
+    strip_x = cx + lang_margin
+    strip_w = cw - 2 * lang_margin
+    n_cols = len(GERMAN_CHARS)
+    cell_w = (strip_w - 2 * lang_pad) / n_cols
+    cap = (f"German on US layout — Compose = {comp_label[0] or 'not configured'},"
+           " press Compose then the sequence · or Ctrl+Shift+U, hex code, Enter")
+    strip_h = (lang_pad * 2 + line_h + spacing + chip_h * 3 + spacing * 2)
+    strip_y = cy + ch - strip_h
+
+    # ---- column layout: as many columns as needed, balanced --------------
+    avail_h = strip_y - spacing - top
+    total_h = sum(h + spacing for _, _, h in rows)
+    ncol = max(1, int(cw // col_min))
+    while True:
+        col_w = (cw - (ncol - 1) * spacing) / ncol
+        target = min(avail_h, total_h / ncol)
+        cols, cur, used = [], [], 0.0
+        overflow = False
+        for kind, payload, h in rows:
+            rh = h + spacing
+            if cur and (used >= target or used + rh > avail_h):
+                cols.append(cur)
+                cur, used = [], 0.0
+                if len(cols) >= ncol:
+                    overflow = True
+                    break
+            cur.append((kind, payload, h))
+            used += rh
+        if not overflow:
+            if cur:
+                cols.append(cur)
+            break
+        ncol += 1
+        if ncol > len(rows):
+            break  # cannot fit; draw what we can
+
+    # ---- draw -------------------------------------------------------------
+    for ci, col in enumerate(cols):
+        x = cx + ci * (col_w + spacing)
+        y = top
+        for kind, payload, h in col:
+            if kind == "header":
+                d.text((x, y + h / 2), payload, font=bold, fill=fg, anchor="lm")
+                d.rectangle([x, y + h - s(style["border_w"]), x + col_w, y + h],
+                            fill=style["border_col"])
+            else:
+                keys, gloss = payload
+                kw = chip_pad * 2 + text_w(keys)
+                d.rectangle([x, y, x + kw, y + h], fill=style["chip_bg"])
+                if underline:
+                    d.rectangle([x, y + h - underline, x + kw, y + h],
+                                fill=style["underline_col"])
+                d.text((x + chip_pad, y + h / 2), keys, font=font,
+                       fill=style["chip_fg"], anchor="lm")
+                d.text((x + kw + spacing, y + h / 2), gloss, font=font,
+                       fill=fg, anchor="lm")
+            y += h + spacing
+
+    # german strip
+    d.rectangle([strip_x, strip_y, strip_x + strip_w, strip_y + strip_h],
+                fill=style["lang_bg"])
+    tx = strip_x + lang_pad
+    ty = strip_y + lang_pad
+    d.text((tx, ty + line_h / 2), cap, font=bold, fill=style["lang_fg"], anchor="lm")
+    ty += line_h + spacing
+    for row_i in range(3):
+        for i, ch_ in enumerate(GERMAN_CHARS):
+            cell_x = tx + i * cell_w + cell_w / 2
+            if row_i == 0:
+                txt, f = ch_, bold
+            elif row_i == 1:
+                txt, f = german[ch_], font
+            else:
+                txt, f = f"Ctrl+Shift+U {ord(ch_):04X}", font
+            d.text((cell_x, ty + chip_h / 2), txt, font=f,
+                   fill=style["lang_fg"], anchor="mm")
+        ty += chip_h + (spacing if row_i < 2 else 0)
+
+    return img
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+def main():
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    ipc = SwayIPC()
+
+    main_cfg = find_main_config()
+    tree = load_config_tree(main_cfg)
+    variables, bindings, settings, input_opts = parse_config(tree)
+    sections = build_entries(bindings, settings)
+
+    wb_cfg = find_waybar_config()
+    style = read_waybar_style(wb_cfg)
+    # sway's own directives win when present (they style the WM directly)
+    if "font" in settings:
+        m = re.match(r"(?:pango:)?(.+?)\s+(\d+)$", settings["font"])
+        if m:
+            style["font_family"], style["font_size"] = m.group(1), float(m.group(2))
+    if "client.focused" in settings:
+        cols = settings["client.focused"]
+        if len(cols) >= 3:
+            c = parse_color(cols[1])
+            if c:
+                style["chip_bg"] = over(c, style["base"])
+
+    german, compose_path = german_sequences()
+    comp_label = compose_key_label(ipc, input_opts)
+    layout_name = "English (US)"
+    for i in ipc.inputs():
+        if i.get("type") == "keyboard" and i.get("xkb_active_layout_name"):
+            layout_name = i["xkb_active_layout_name"]
+            break
+
+    bg_mode = settings.get("bg", ("*", "", "fill"))[2]
+    mod_label = key_label(variables.get("mod", "Mod4"))
+    meta_extra = f" · sources: {main_cfg}"
+
+    outputs = ipc.outputs()
+    first_path = None
+    for out in outputs:
+        img = render(out, style, sections, german, comp_label, layout_name,
+                     mod_label, meta_extra)
+        path = CACHE_DIR / f"wallpaper-{out['name']}.png"
+        img.save(path)
+        if first_path is None:
+            first_path = path
+            img.save(CACHE_DIR / "wallpaper.png")
+        res = ipc.command(f"output {out['name']} bg {path} {bg_mode}")
+        ok = all(r.get("success") for r in res) if isinstance(res, list) else bool(res)
+        print(f"{out['name']}: {img.size[0]}x{img.size[1]} -> {path} (applied: {ok})")
+
+    n_entries = sum(len(s["entries"]) for s in sections)
+    print(f"{n_entries} bindings in {len(sections)} sections; "
+          f"font {style['font_family']} {style['font_size']}px; "
+          f"padding {style['sheet_padding']}px; compose file: {compose_path}")
+
+    # Keep the bar itself in sync: SIGUSR2 is waybar's documented reload
+    # signal, so one sway reload applies style.css to bar AND wallpaper.
+    subprocess.run(["pkill", "-USR2", "-x", "waybar"], check=False)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(f"\n=== {datetime.now().isoformat()} ===\n")
+            f.write(traceback.format_exc())
+        traceback.print_exc()
+        sys.exit(1)

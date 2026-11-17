@@ -1,0 +1,12 @@
+# Packages added on top of stock fedora-sway-atomic (Fedora repos). Globs allowed.
+tailscale
+syncthing
+fastfetch
+ramalama
+qutebrowser
+gh
+rclone
+kakoune
+tesseract
+tesseract-langpack-*
+tesseract-script-*

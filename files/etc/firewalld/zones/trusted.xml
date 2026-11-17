@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<zone target="ACCEPT">
+  <short>Trusted</short>
+  <description>Tailnet devices: all connections accepted.</description>
+  <interface name="tailscale0"/>
+  <forward/>
+</zone>

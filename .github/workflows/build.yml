@@ -1,0 +1,57 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "iso/**"]
+  schedule:
+    - cron: "30 6 * * *"   # daily, after Fedora publishes its base images
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/fe_sw_at
+  FEDORA: "44"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          podman build --pull=always \
+            -t "$IMAGE:$FEDORA" -t "$IMAGE:latest" -t "$IMAGE:$FEDORA.$DATE" .
+
+      - name: Push
+        id: push
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          DATE=$(date -u +%Y%m%d)
+          for tag in "$FEDORA" latest "$FEDORA.$DATE"; do
+            podman push --digestfile digest "$IMAGE:$tag"
+          done
+          echo "digest=$(cat digest)" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+          COSIGN_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          cosign login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY "$IMAGE@${{ steps.push.outputs.digest }}"

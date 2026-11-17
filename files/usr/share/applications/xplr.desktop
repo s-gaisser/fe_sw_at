@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=xplr
+GenericName=File Manager
+Comment=Hackable TUI file explorer
+Exec=foot -e xplr %f
+Terminal=false
+Icon=system-file-manager
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;

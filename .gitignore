@@ -1,0 +1,4 @@
+iso/output/
+cosign.key
+*.key
+cosign.pub
