@@ -1,0 +1,12 @@
+# Default XDG user directories, created by xdg-user-dirs-update
+# (xdg-user-dirs.service) on first login. Paths are relative to $HOME.
+# Short custom names so apps (e.g. browsers) reuse these instead of
+# recreating Desktop/, Downloads/, etc.
+DESKTOP=work
+DOWNLOAD=load
+TEMPLATES=form
+PUBLICSHARE=open
+DOCUMENTS=doc
+MUSIC=aud
+PICTURES=img
+VIDEOS=vid
