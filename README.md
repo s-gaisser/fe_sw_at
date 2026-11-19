@@ -15,7 +15,13 @@ top of Fedora's latest base, signs it with cosign, and publishes it to
 - kakoune as the system editor
 - gh, rclone, fastfetch, ramalama
 - tesseract with all language and script packs
-- a cheat-sheet wallpaper generated from the live sway/waybar config
+- `sway_wp.py`: a wallpaper that explains the session from its own configuration
+  (key bindings, window decorations, gaps, bar, notifications, launcher, lock
+  screen, nag bar, terminal, outputs, inputs), drawn with sway's own
+  Pango/Cairo rules and refreshed on every sway reload. Choose what it shows in
+  `/etc/sway_wp/sway_wp-elements.config` (per user:
+  `~/.config/sway_wp/sway_wp-elements.config`); `sway_wp.py --list` lists
+  every element and its sources
 
 **Removed:**
 - Firefox
@@ -41,6 +47,7 @@ The full list is in [`packages.remove`](packages.remove).
 | `packages.install` / `packages.remove` | Package changes, one per line |
 | `files/` | Copied to `/` in the image |
 | `iso/` | Installer ISO build (`sudo iso/build-netinst-iso.sh`) |
+| `backup/` | Previous versions of replaced files (not part of the image) |
 | `.github/workflows/build.yml` | Daily build, push and sign |
 
 ## Everyday use

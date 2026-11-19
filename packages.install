@@ -10,3 +10,6 @@ kakoune
 tesseract
 tesseract-langpack-*
 tesseract-script-*
+# sway_wp.py renders with sway's own text stack (Pango + Cairo via GObject)
+python3-gobject
+python3-cairo
