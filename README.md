@@ -40,7 +40,7 @@ The full list is in [`packages.remove`](packages.remove).
 | `Containerfile` | The image definition |
 | `packages.install` / `packages.remove` | Package changes, one per line |
 | `files/` | Copied to `/` in the image |
-| `iso/` | Installer ISO build (`sudo iso/build-iso.sh`) |
+| `iso/` | Installer ISO build (`sudo iso/build-netinst-iso.sh`) |
 | `.github/workflows/build.yml` | Daily build, push and sign |
 
 ## Everyday use
@@ -68,11 +68,24 @@ After the first successful build, set the ghcr package's visibility to
 
 ## Installing
 
-1. Run `sudo iso/build-iso.sh`. The result is `iso/output/bootiso/install.iso`.
-2. Write the ISO to a USB stick and boot from it. Choose the disk with
-   **encryption enabled**, and create the user and hostname.
+1. Run `sudo iso/build-netinst-iso.sh`. It downloads the official Fedora
+   netinstall ISO, verifies it and embeds [`iso/fe_sw_at.ks`](iso/fe_sw_at.ks).
+   The result is `iso/output-netinst/fe_sw_at-netinst.iso`.
+2. Write the ISO to a USB stick and boot from it. Connect to the network
+   (Wi-Fi works; the image is pulled during installation), choose the disk
+   with **encryption enabled**, and create the user and hostname.
 3. After the first boot, run:
    ```sh
    sudo bootc switch --enforce-container-sigpolicy ghcr.io/s-gaisser/fe_sw_at:44
    sudo tailscale up
    ```
+4. Restore your home directory from the backup. Personal settings, such as
+   the IBus input method environment and `~/.XCompose`, live there and not in
+   the image.
+
+**Offline alternative:** `sudo iso/build-iso.sh` builds an ISO with the image
+already inside (`iso/output/bootiso/install.iso`), so it needs no network.
+Its installer is built by bootc-image-builder from a minimal package set
+that lacks AMD GPU and MediaTek Wi-Fi firmware. On this machine the installer
+therefore runs at a fallback resolution and shows no Wi-Fi. The installed
+system is not affected.

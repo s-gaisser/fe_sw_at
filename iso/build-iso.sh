@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build the installer ISO from the published image. Run on the HOST as root:
+# Offline alternative to build-netinst-iso.sh: an installer ISO with the
+# published image embedded. Its installer lacks AMD GPU and MediaTek Wi-Fi
+# firmware (fallback resolution, no Wi-Fi). Run on the HOST as root:
 #   sudo ./iso/build-iso.sh [image-ref]
 # Result: iso/output/bootiso/install.iso
 set -euo pipefail

@@ -1,4 +1,5 @@
-# bootc-image-builder config for the installer ISO.
+# bootc-image-builder config for the offline installer ISO (build-iso.sh).
+# Keep the kickstart below in sync with fe_sw_at.ks.
 # Language, keyboard and time zone are preset; disk (enable encryption!), user,
 # password and hostname are chosen interactively in the installer.
 [customizations.installer.kickstart]

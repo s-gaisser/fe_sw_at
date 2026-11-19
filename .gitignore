@@ -1,4 +1,5 @@
 iso/output/
+iso/output-netinst/
 cosign.key
 *.key
 cosign.pub
